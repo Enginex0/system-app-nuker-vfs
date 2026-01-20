@@ -1,0 +1,6 @@
+id=system_app_nuker
+name=App Nuker (VFS Enhanced)
+version=v1.1.9-vfs
+versionCode=120
+author=ChiseWaguri, Enginex0 & Contributors
+description=WebUI-based debloater with NoMount VFS support (undetectable)

@@ -1,0 +1,29 @@
+# Build artifacts
+*.zip
+*.tar.gz
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Module runtime files (should not be in repo)
+common/tmp/
+common/bin/keygen
+
+# WebUI build cache
+webui/assets/*.map
+
+# Logs
+*.log

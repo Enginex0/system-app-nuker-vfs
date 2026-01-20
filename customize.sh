@@ -1,0 +1,226 @@
+#!/bin/sh
+# customize.sh
+# this is part of system app nuker
+
+SKIPUNZIP=0
+MODDIR="/data/adb/modules/system_app_nuker"
+PERSIST_DIR="/data/adb/system_app_nuker"
+
+# import config
+uninstall_fallback=false
+refresh_applist=true
+disable_only_mode=false
+[ -f "$PERSIST_DIR/config.sh" ] && . $PERSIST_DIR/config.sh
+
+# === FUNCTIONS ===
+
+# set config.sh value
+set_config() {
+    sed -i "s/$1=.*/$1=$2/" "$PERSIST_DIR/config.sh"
+}
+
+# === MAIN SCRIPT ===
+
+# exit when MODPATH is undefined
+[ -z "$MODPATH" ] && { echo "[ERROR] MODPATH is undefined. Exiting setup."; exit 1; }
+
+# create persistent directory if it doesn't exist
+mkdir -p "$PERSIST_DIR"
+
+# move config to persist dir
+mv "$MODPATH/config.sh" "$PERSIST_DIR/"
+
+# set permissions for config
+set_perm "$PERSIST_DIR/config.sh" 0 2000 0755
+
+# display loading animation for compatible environments
+if [ "$MMRL" = "true" ] || { [ "$KSU" = "true" ] && [ "$KSU_VER_CODE" -ge 11998 ]; } ||
+    { [ "$KSU_NEXT" = "true" ] && [ "$KSU_VER_CODE" -ge 12144 ]; } ||
+    { [ "$APATCH" = "true" ] && [ "$APATCH_VER_CODE" -ge 11022 ]; }; then
+        clear
+        echo "[*] Installing System App Nuker... Please wait."
+        sleep 0.5
+        
+        for _ in $(seq 1 3); do
+            for symbol in '-' '\' '|' '/'; do
+                echo "[$symbol] Initializing..."
+                sleep 0.1
+                clear
+            done
+        done
+else
+    echo "[*] Initializing System App Nuker..."
+    sleep 1.5 # sleep a bit to make it look like something is happening!!
+fi
+
+# set up aapt binary
+mkdir -p "$MODPATH/common"
+CPU_ABI=$(getprop ro.product.cpu.abi)
+AAPT_PATH="$MODPATH/bin/$CPU_ABI/aapt"
+mv "$AAPT_PATH" "$MODPATH/common/aapt"
+set_perm "$MODPATH/common/aapt" 0 2000 0755
+
+# set permissions for nuke script
+set_perm "$MODPATH/nuke.sh" 0 2000 0755
+
+# clean up bin directory
+rm -rf "$MODPATH/bin"
+
+# remove action.sh on webui-supported env
+if [ -n "$KSU" ] || [ -n "$APATCH" ]; then
+    rm -f "$MODPATH/action.sh"
+fi
+
+# --- check for mountify requirements ---
+
+# check for overlayfs
+if grep -q "overlay" /proc/filesystems > /dev/null 2>&1; then
+    overlay_supported=true
+else
+    overlay_supported=false
+fi
+
+# check if tmpfs xattr is supported
+MNT_FOLDER=""
+[ -w /mnt ] && MNT_FOLDER=/mnt
+[ -w /mnt/vendor ] && MNT_FOLDER=/mnt/vendor
+testfile="$MNT_FOLDER/tmpfs_xattr_testfile"
+rm $testfile > /dev/null 2>&1
+busybox mknod "$testfile" c 0 0 > /dev/null 2>&1
+if busybox setfattr -n trusted.overlay.whiteout -v y "$testfile" > /dev/null 2>&1 ; then
+    rm $testfile > /dev/null 2>&1
+    tmpfs_xattr_supported=true
+else
+    rm $testfile > /dev/null 2>&1
+    tmpfs_xattr_supported=false
+fi
+
+# check mounting system
+if { [ "$KSU" = true ] && [ ! "$KSU_MAGIC_MOUNT" = true ] &&  [ "$KSU_VER_CODE" -lt 22098 ]; } || { [ "$APATCH" = true ] && [ ! "$APATCH_BIND_MOUNT" = true ]; }; then
+    magic_mount=false
+    echo "[i] No magic mount detected. Likely using overlayfs root manager."
+else
+    magic_mount=true
+    echo "[i] Magic mount (e.g. Magisk) or KSU >22098 detected."
+fi
+
+# --- check mounting options (priority: vfs > mountify module > standalone > default) ---
+mounting_mode=0
+
+mountify_active=false
+mountify_mounted=false
+nomount_vfs_active=false
+
+# --- PRIORITY 1: NoMount VFS (best - undetectable) ---
+NOMOUNT_MODULE="/data/adb/modules/nomount"
+if [ -f "$NOMOUNT_MODULE/module.prop" ] && [ ! -f "$NOMOUNT_MODULE/disable" ] && [ ! -f "$NOMOUNT_MODULE/remove" ]; then
+    NM_BIN="$NOMOUNT_MODULE/bin/nm"
+    if [ -x "$NM_BIN" ] && "$NM_BIN" ver >/dev/null 2>&1; then
+        echo "[✓] NoMount VFS detected"
+        nomount_vfs_active=true
+        mounting_mode=3
+        touch "$MODPATH/skip_mount"
+        touch "$MODPATH/skip_mountify"
+    fi
+fi
+
+# --- PRIORITY 2: Mountify module ---
+# only check if VFS is not active
+if [ "$nomount_vfs_active" = false ]; then
+    # if mountify module is active
+    if [ -f "/data/adb/modules/mountify/module.prop" ] && \
+       [ ! -f "/data/adb/modules/mountify/disable" ] && \
+       [ ! -f "/data/adb/modules/mountify/remove" ]; then
+        mountify_active=true
+        mountify_mounts=$(grep -o 'mountify_mounts=[0-9]' /data/adb/mountify/config.sh | cut -d= -f2)
+
+        # if mountify module will mount this module
+        if [ "$mountify_mounts" = "2" ] || \
+           { [ "$mountify_mounts" = "1" ] && grep -q "system_app_nuker" /data/adb/mountify/modules.txt; }; then
+            echo "[✓] Mounting will be handled by the mountify module."
+            mountify_mounted=true
+            mounting_mode=2
+            rm -f "$MODPATH/skip_mountify"
+        else
+            echo "[x] mountify module won't mount this module."
+        fi
+    fi
+fi
+
+# --- PRIORITY 3: Standalone mountify script ---
+# fallback path - only if VFS and mountify module not active
+if [ "$nomount_vfs_active" = false ] && \
+   { [ "$mountify_active" = false ] || [ "$mountify_mounted" = false ]; } && \
+   { { [ "$overlay_supported" = true ] && [ "$tmpfs_xattr_supported" = true ]; } || [ "$magic_mount" = false ]; }; then
+    echo "[+] Standalone mountify script enabled (requirements met)."
+
+    # skip mount (cuz standalone script will mount us)
+    touch "$MODPATH/skip_mount"
+    # skip mountify (just in case)
+    touch "$MODPATH/skip_mountify"
+    # config
+    mounting_mode=1
+fi
+
+# --- PRIORITY 4: Default (mounting_mode=0) ---
+# if nothing else matched, mounting_mode stays 0
+
+# set mount_system based on detected mode
+if [ "$mounting_mode" = "3" ]; then
+    mount_system=vfs_nomount
+elif [ "$mounting_mode" = "2" ] || [ "$mounting_mode" = "1" ]; then
+    mount_system=overlayfs
+elif [ "$magic_mount" = false ]; then
+    mount_system=overlayfs
+else
+    mount_system=magic_mount
+fi
+
+# set configs
+set_config mounting_mode $mounting_mode
+set_config mount_system $mount_system
+
+echo ""
+
+# migrate old things
+[ -f "$PERSIST_DIR/nuke_list.json" ] && {
+    echo "[*] nuke_list.json found. Migrating..."
+    sh "$MODPATH/nuke.sh" update
+}
+
+# migrate config.sh (in case when it has a new value)
+# variable of the config is defined by sourcing the old config.sh and the script
+# value like uninstall_fallback would be persist, but mounting stuff would not.
+while IFS='=' read key _; do
+    # skip empty, commented, or lines with spaces
+    [ -z "$key" ] && continue
+    echo "$key" | grep -q '^[[:space:]]*#' && continue
+    echo "$key" | grep -Eq '^[a-zA-Z_][a-zA-Z0-9_]*$' || continue
+
+    # trim whitespace
+    key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    # get current value of the variable
+    eval val="\$$key"
+
+    # call set_config with the key and its current value
+    set_config "$key" "$val"
+    echo "[~] config: $key=$val"
+done < "$PERSIST_DIR/config.sh"
+echo "[i] Edit config at: $PERSIST_DIR/config.sh"
+echo ""
+
+# warn KSU or APatch user if module would not be mounted globally
+if { [ -n "$KSU" ] || [ -n "$APATCH" ]; } && \
+   [ "$mounting_mode" = "0" ] && [ "$mountify_mounted" != true ]; then
+    echo "[!] KSU/APatch detected. Module won't mount globally."
+    echo "[i] Hint: Turn off 'unmount by default' to fix that."
+fi
+
+# success message
+echo "[✓] System App Nuker setup complete."
+
+# give space before post-customize.sh manager thing
+echo ""
+
+# EOF
